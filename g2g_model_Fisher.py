@@ -13,14 +13,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from ignite.engine import Engine, Events
-from ignite.handlers import ModelCheckpoint
+
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 import umap
 from matplotlib import pyplot as plt
-
-from itertools import islice
-from prox import inplace_prox, inplace_group_prox, prox
 
 CHECKPOINT_PREFIX = "g2g"
 
@@ -253,28 +249,28 @@ class Encoder(nn.Module):
         ds_ij = sigma_i - sigma_j
         
         closer = 2*((torch.log (
-            (torch.sqrt(0.5*diff_ij**2+ss_ij**2)+torch.sqrt(0.5*diff_ij**2+ds_ij**2))/\
-            (torch.sqrt(0.5*diff_ij**2+ss_ij**2)-torch.sqrt(0.5*diff_ij**2+ds_ij**2))
-             ))**2).sum(axis=-1)
+            (torch.sqrt(0.5*diff_ij**2+ss_ij**2)+torch.sqrt(0.5*diff_ij**2+ds_ij**2)+1e-10)/\
+            (torch.sqrt(0.5*diff_ij**2+ss_ij**2)-torch.sqrt(0.5*diff_ij**2+ds_ij**2)+1e-10)
+             +1e-10))**2).sum(axis=-1)
+        
 
         diff_ik = mu_i - mu_k
         ss_ik = sigma_i + sigma_k
         ds_ik = sigma_i - sigma_k
         
         apart = 2*((torch.log (
-            (torch.sqrt(0.5*diff_ik**2+ss_ik**2)+torch.sqrt(0.5*diff_ik**2+ds_ik**2))/\
+            (torch.sqrt(0.5*diff_ik**2+ss_ik**2)+torch.sqrt(0.5*diff_ik**2+ds_ik**2)+1e-10)/\
             (torch.sqrt(0.5*diff_ik**2+ss_ik**2)-torch.sqrt(0.5*diff_ik**2+ds_ik**2)+1e-10)
-             ))**2).sum(axis=-1)
+             +1e-10))**2).sum(axis=-1)
 
-        E = closer + torch.exp(-torch.sqrt(apart)) 
+        E = closer + torch.exp(-torch.sqrt(apart+1e-10)) 
 
         loss = E.dot(w) / nsamples
-
+        
         return loss
-
-
-class LassoEncoder(nn.Module):
-    def __init__(self, D, L, groups=None, lambda_=0, M=10):
+    
+class Encoder(nn.Module):
+    def __init__(self, D, L):
         """Construct the encoder
 
         Parameters
@@ -283,68 +279,33 @@ class LassoEncoder(nn.Module):
             Dimensionality of the node attributes
         L : int
             Dimensionality of the embedding
-        groups : list
-            `groups` is a list of list such that `groups[i]`
-        contains the indices of the features in the i-th group
-        lambda_ : float
-            lambda_ for L1 norm of skip layer, we have to tune this while training
-        M : float
-            M controls the nonlinearity of the model. The larger M, the more nonlinearity of the model.
 
-        Rmk.这里的lambda_不用输入，真正训练的时候，可以再赋值
-            groups是为了后续有可能想要将一些协同的基因分成一组，可能做类似group Lasso的优化，当前还没有用到。
         """
-        if groups is not None:
-            n_inputs = D
-            all_indices = []
-            for g in groups:
-                for i in g:
-                    all_indices.append(i)
-            assert len(all_indices) == n_inputs and set(all_indices) == set(
-                range(n_inputs)
-            ), f"Groups must be a partition of range(n_inputs={n_inputs})"
-
-        self.groups = groups
-
         super().__init__()
-        self.M = M
-        self.lambda_ = lambda_
+
         self.D = D
         self.L = L
-
-        self.linear1 = nn.Linear(D, 256)
-        self.linear2 = nn.Linear(256, 128)
-        self.linear_mu = nn.Linear(128, L)
-        self.linear_sigma = nn.Linear(128, L)
-        self.skip = nn.Linear(D, 2*L, bias=False)
-
-        # 记录所有隐层，用来做L2正则化
-        self.layers = [self.linear1,self.linear2,self.linear_mu,self.linear_sigma]
 
         def xavier_init(layer):
             nn.init.xavier_normal_(layer.weight)
             # TODO: Initialize bias with xavier but pytorch cannot compute the
             # necessary fan-in for 1-dimensional parameters
-        
+
+        self.linear1 = nn.Linear(D, 256)
+        self.linear2 = nn.Linear(256, 128)
+        self.linear_mu = nn.Linear(128, L)
+        self.linear_sigma = nn.Linear(128, L)
+
         xavier_init(self.linear1)
         xavier_init(self.linear2)
         xavier_init(self.linear_mu)
         xavier_init(self.linear_sigma)
-        xavier_init(self.skip)
 
     def forward(self, node):
         h = F.relu(self.linear1(node))
         h = F.relu(self.linear2(h))
-        skip_term = self.skip(node)
-        # print(skip_term.shape)
-        
-        if len(skip_term.shape) > 1:
-            mu = self.linear_mu(h) + skip_term[:,:self.L]
-            sigma = self.linear_sigma(h) + skip_term[:,self.L:] # 这里我们不再能够保证sigma的非负性，再过一遍elu
-        else:
-            mu = self.linear_mu(h) + skip_term[:self.L]
-            sigma = self.linear_sigma(h) + skip_term[self.L:] # 这里我们不再能够保证sigma的非负性，再过一遍elu
-        sigma = F.elu(sigma) + 1
+        mu = self.linear_mu(h)
+        sigma = F.elu(self.linear_sigma(h)) + 1
 
         return mu, sigma
 
@@ -366,118 +327,26 @@ class LassoEncoder(nn.Module):
         ds_ij = sigma_i - sigma_j
         
         closer = 2*((torch.log (
-            (torch.sqrt(0.5*diff_ij**2+ss_ij**2)+torch.sqrt(0.5*diff_ij**2+ds_ij**2))/\
+            (torch.sqrt(0.5*diff_ij**2+ss_ij**2)+torch.sqrt(0.5*diff_ij**2+ds_ij**2)+1e-10)/\
             (torch.sqrt(0.5*diff_ij**2+ss_ij**2)-torch.sqrt(0.5*diff_ij**2+ds_ij**2)+1e-10)
-             ))**2).sum(axis=-1)
+             +1e-10))**2).sum(axis=-1)
+        
 
         diff_ik = mu_i - mu_k
         ss_ik = sigma_i + sigma_k
         ds_ik = sigma_i - sigma_k
         
         apart = 2*((torch.log (
-            (torch.sqrt(0.5*diff_ik**2+ss_ik**2)+torch.sqrt(0.5*diff_ik**2+ds_ik**2))/\
+            (torch.sqrt(0.5*diff_ik**2+ss_ik**2)+torch.sqrt(0.5*diff_ik**2+ds_ik**2)+1e-10)/\
             (torch.sqrt(0.5*diff_ik**2+ss_ik**2)-torch.sqrt(0.5*diff_ik**2+ds_ik**2)+1e-10)
-             ))**2).sum(axis=-1)
+             +1e-10))**2).sum(axis=-1)
 
-
-        E = closer + torch.exp(-torch.sqrt(apart)) + self.lambda_*torch.norm(self.skip.weight.data, p=2, dim=0).sum()
+        E = closer + torch.exp(-torch.sqrt(apart+1e-10)) 
 
         loss = E.dot(w) / nsamples
-
+        
         return loss
-    
-    ######################################################################################
-    # define proximal operator
-    ######################################################################################
-    
-     
-    def prox(self, *, lambda_bar=0):
-        if self.groups is None:
-            with torch.no_grad():
-                inplace_prox(
-                    beta=self.skip,
-                    theta=self.layers[0],
-                    lambda_=self.lambda_,
-                    lambda_bar=lambda_bar,
-                    M=self.M,
-                )
-        else:
-            with torch.no_grad():
-                inplace_group_prox(
-                    groups=self.groups,
-                    beta=self.skip,
-                    theta=self.layers[0],
-                    lambda_=self.lambda_,
-                    lambda_bar=lambda_bar,
-                    M=self.M,
-                )
-    
-    # lambda_start is not used
-    def lambda_start(
-        self,
-        M=1,
-        lambda_bar=0,
-        factor=2,
-    ):
-        """Estimate when the model will start to sparsify."""
-
-        def is_sparse(lambda_):
-            with torch.no_grad():
-                beta = self.skip.weight.data
-                theta = self.layers[0].weight.data
-
-                for _ in range(10000):
-                    new_beta, theta = prox(
-                        beta,
-                        theta,
-                        lambda_=lambda_,
-                        lambda_bar=lambda_bar,
-                        M=M,
-                    )
-                    if torch.abs(beta - new_beta).max() < 1e-5:
-                        break
-                    beta = new_beta
-                return (torch.norm(beta, p=2, dim=0) == 0).sum()
-
-        start = 1e-6
-        while not is_sparse(factor * start):
-            start *= factor
-        return start
-
-    def l2_regularization(self):
-        """
-        L2 regulatization of the MLP without the first layer
-        which is bounded by the skip connection
-        """
-        ans = 0
-        for layer in islice(self.layers, 1, None):
-            ans += (
-                torch.norm(
-                    layer.weight.data,
-                    p=2,
-                )
-                ** 2
-            )
-        return ans
-
-    def l1_regularization_skip(self):
-        return torch.norm(self.skip.weight.data, p=2, dim=0).sum()
-
-    def l2_regularization_skip(self):
-        return torch.norm(self.skip.weight.data, p=2)
-    
-    # return a tensor of bools, Trues stands for features being selected, while Falses stands for the opposite.
-    def input_mask(self):
-        with torch.no_grad():
-            return torch.norm(self.skip.weight.data, p=2, dim=0) != 0
-    
-    # return a int, the number of selected features
-    def selected_count(self):
-        return self.input_mask().sum().item()
-    
-    # not important 
-    def cpu_state_dict(self):
-        return {k: v.detach().clone().cpu() for k, v in self.state_dict().items()}
+        
 
 def level_sets(A, K):
     """Enumerate the level sets for each node's neighborhood

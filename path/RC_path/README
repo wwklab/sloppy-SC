@@ -1,0 +1,31 @@
+Filename description:：
+DG_bin_ppt_Granule_P2M_rc_nrc_10_dpca_10.npy
+
+average_path = np.load(f'{data_name}_{branch_name}_P2M_rc_nrc_{nrc}_dpca_{dpca}.npy')
+
+nrc：number of reaction coordinates
+dpca: number of leading dimensions selected to compute the reaction coordinates
+
+def find_nearest_indices_voronoi(adata, path0, n_nei = 30, dpca = 10):
+    cells_2d = adata.obsm["X_pca"]  
+    path_2d = path0           
+    cells_2d = adata.obsm["X_pca"][:,:dpca]
+    path_2d = path0[:,:dpca]
+    dist_matrix = distance.cdist(cells_2d, path_2d)  # [N_cells, N_rc_points]
+    closest_rc = np.argmin(dist_matrix, axis=1)      # RC index assigned to each cell
+    cells_in_voronoi = {} 
+    for rc_i in range(path_2d.shape[0]):
+        idx_in_cell = np.where(closest_rc == rc_i)[0]
+        cells_in_voronoi[rc_i] = idx_in_cell
+    nearest_30_cells = []  # nearest_30_cells stores the n_nei closest cells associated with each RC point
+    nearest_cell = []  # nearest_cell stores the single nearest cell for each RC point
+    for rc_i in range(path_2d.shape[0]):
+        idx_in_cell = cells_in_voronoi[rc_i]
+        if len(idx_in_cell) == 0:
+            nearest_30_cells[rc_i] = np.array([])
+            nearest_cell[rc_i] = np.array([])
+            continue
+        dist_to_rc = dist_matrix[idx_in_cell, rc_i]
+        nearest_30_cells.append(idx_in_cell[np.argsort(dist_to_rc)[:n_nei]])
+        nearest_cell.append(idx_in_cell[np.argsort(dist_to_rc)[0]])
+    return nearest_30_cells, nearest_cell

@@ -15,7 +15,7 @@ def main():
                     print(cnt)
                     cnt += 1
 
-                    result_path = 'main_results/'+data_name+' '+str([k_nei,K,L])+'/'
+                    result_path = 'encoder/'+data_name+' '+str([k_nei,K,L])+'/'
                     figure_path = result_path
                     cmap = plt.colormaps['Spectral']
 

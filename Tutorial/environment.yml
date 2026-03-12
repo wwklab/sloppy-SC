@@ -298,7 +298,7 @@ dependencies:
       - referencing==0.36.2
       - rpds-py==0.25.1
       - s-gd2==1.8.1
-      - scanpy==1.9.4
+      - scanpy==1.10.3
       - scikit-learn==1.4.2
       - scikit-learn-extra==0.3.0
       - scipy==1.11.1
@@ -330,3 +330,4 @@ dependencies:
       - yarl==1.22.0
       - zope-interface==7.2
 prefix: D:\Anaconda\envs\pytorch
+
